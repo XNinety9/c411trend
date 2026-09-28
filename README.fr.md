@@ -91,8 +91,11 @@ Le cookie n'est envoyé qu'à `https://c411.org/api/auth/me`. Il n'est jamais
 des nombres. Tous les détails, frontières de confiance et limites comprises,
 sont dans [SECURITY.md](SECURITY.md) (en anglais).
 
-Nécessite `python3` avec `cryptography` (Omarchy fournit les deux), `curl`, et
-`secret-tool` pour les navigateurs Chromium.
+Nécessite `python3` et `curl`. Les navigateurs Chromium demandent en plus
+`secret-tool` (libsecret, inclus dans la base d'Omarchy) et le module Python
+`cryptography`, qui n'est pas toujours installé : `omarchy pkg add
+python-cryptography` si le panneau signale qu'il manque. Les navigateurs de la
+famille Firefox et le mode `File` n'ont besoin ni de l'un ni de l'autre.
 
 ## Utilisation
 

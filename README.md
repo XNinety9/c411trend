@@ -86,8 +86,10 @@ The cookie is only ever sent to `https://c411.org/api/auth/me`, never written,
 logged or put on a command line. The history holds numbers only. The full
 details, including trust boundaries and limits, are in [SECURITY.md](SECURITY.md).
 
-Requires `python3` with `cryptography` (Omarchy ships both), `curl`, and
-`secret-tool` for Chromium browsers.
+Requires `python3` and `curl`. Chromium-family browsers also need `secret-tool`
+(libsecret, part of Omarchy's base) and the Python `cryptography` module, which
+is not always installed: `omarchy pkg add python-cryptography` if the panel
+says it is missing. Firefox-family browsers and `File` mode need neither.
 
 ## Use
 
