@@ -93,8 +93,8 @@ sont dans [SECURITY.md](SECURITY.md) (en anglais).
 
 Nécessite `python3` et `curl`. Les navigateurs Chromium demandent en plus
 `secret-tool` (libsecret, inclus dans la base d'Omarchy) et le module Python
-`cryptography`, qui n'est pas toujours installé : `omarchy pkg add
-python-cryptography` si le panneau signale qu'il manque. Les navigateurs de la
+`cryptography`, qui n'est pas toujours installé : ajoute le paquet
+`python-cryptography` si le panneau signale qu'il manque. Les navigateurs de la
 famille Firefox et le mode `File` n'ont besoin ni de l'un ni de l'autre.
 
 ## Utilisation

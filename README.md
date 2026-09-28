@@ -88,7 +88,7 @@ details, including trust boundaries and limits, are in [SECURITY.md](SECURITY.md
 
 Requires `python3` and `curl`. Chromium-family browsers also need `secret-tool`
 (libsecret, part of Omarchy's base) and the Python `cryptography` module, which
-is not always installed: `omarchy pkg add python-cryptography` if the panel
+is not always installed: add the `python-cryptography` package if the panel
 says it is missing. Firefox-family browsers and `File` mode need neither.
 
 ## Use
