@@ -6,25 +6,37 @@
 import { readFileSync, readdirSync, lstatSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 const scripts = resolve(process.env.MARKETPLACE_DIR || "", "scripts");
 const { buildSecurityBaseline } = await import(pathToFileURL(join(scripts, "security-baseline-analysis.mjs")));
 const { isSecurityScanPath } = await import(pathToFileURL(join(scripts, "security-baseline-scope.mjs")));
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const files = [];
-(function walk(dir) {
-  for (const name of readdirSync(dir)) {
-    if (name === ".git" || name === "node_modules") continue;
-    const path = join(dir, name);
-    const st = lstatSync(path);
-    if (st.isDirectory()) walk(path);
-    else if (st.isFile()) {
-      const rel = relative(root, path);
-      if (isSecurityScanPath(rel)) files.push({ path: rel, content: readFileSync(path, "utf8") });
-    }
+// Scan what the marketplace scans: the committed tree. `git ls-files` also
+// keeps out untracked checkouts such as CI's .marketplace/ (the scanner's own
+// source would trip every rule). Outside a git checkout, walk the directory.
+function trackedFiles() {
+  try {
+    return execFileSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8" }).split("\0").filter(Boolean);
+  } catch {
+    const out = [];
+    (function walk(dir) {
+      for (const name of readdirSync(dir)) {
+        if ([".git", "node_modules", ".marketplace"].includes(name)) continue;
+        const path = join(dir, name);
+        const st = lstatSync(path);
+        if (st.isDirectory()) walk(path);
+        else if (st.isFile()) out.push(relative(root, path));
+      }
+    })(root);
+    return out;
   }
-})(root);
+}
+
+const files = trackedFiles()
+  .filter((rel) => isSecurityScanPath(rel))
+  .map((rel) => ({ path: rel, content: readFileSync(join(root, rel), "utf8") }));
 
 const result = buildSecurityBaseline({
   repository: "xninety9/c411trend",
