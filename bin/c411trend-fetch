@@ -1,0 +1,844 @@
+#!/usr/bin/python3
+"""Fetch the logged-in user's upload/download/ratio from C411 and log a sample.
+
+The session cookie is read straight from a browser's cookie store (Chromium
+family: decrypted with the key from the Secret Service; Firefox family: plain
+SQLite), or from a file the user pasted it into. It is handed to curl on stdin,
+never on the command line, and is never printed.
+
+With --browser auto (the default) the store that worked last time is tried
+first, then the desktop's default browser, then every other known browser,
+native, Flatpak or Snap, until one holds a live c411.org session.
+
+Prints one JSON object on stdout:
+  {"ok": true,  "sample": {...}, "user": {...}, "source": {...}}
+  {"ok": false, "error": "<kind>", "message": "<human text>"}
+Error kinds: no-browser, no-cookie, keyring, crypto, expired, network, bad-response.
+"""
+
+import argparse
+import fcntl
+import hashlib
+import json
+import math
+import select
+import os
+import re
+import shutil
+import signal
+import sqlite3
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+HOST = "c411.org"
+API = "https://c411.org/api/auth/me"
+UA = "C411Trend (+omarchy plugin)"
+# Auto mode stops asking the tracker after this many stale sessions.
+MAX_API_ATTEMPTS = 3
+# The API answers a few hundred bytes; anything past this is not the API.
+MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_COOKIE_HEADER = 8192
+# Whole run, keyring prompts and every store included.
+DEFAULT_DEADLINE = 90
+# RFC 6265: cookie-name is a token, cookie-value is cookie-octets (optionally
+# DQUOTEd). Anything else - CR/LF above all - never reaches curl's config.
+COOKIE_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+COOKIE_VALUE = re.compile(r'^"?[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]*"?$')
+# History: rewrite once the file passes this size, keeping every sample of the
+# last RECENT_DAYS and one per THIN_SECONDS before that.
+COMPACT_BYTES = 2 * 1024 * 1024
+RECENT_DAYS = 90
+THIN_SECONDS = 6 * 3600
+# Seconds between 1601-01-01 (Chromium's epoch) and 1970-01-01.
+CHROMIUM_EPOCH_OFFSET = 11644473600
+
+HOME = os.path.expanduser("~")
+STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.join(HOME, ".local/state"), "c411trend")
+CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config"), "c411trend")
+HISTORY = os.path.join(STATE_DIR, "history.jsonl")
+LAST_SOURCE = os.path.join(STATE_DIR, "source")
+COOKIE_FILE = os.path.join(CONFIG_DIR, "cookie")
+
+# name -> family, display label, cookie store roots (relative to $HOME, native
+# then Flatpak/Snap), Secret Service `application` names to try (Chromium),
+# and substrings identifying its .desktop file.
+BROWSERS = {
+    "brave": {
+        "family": "chromium", "label": "Brave",
+        "roots": [".config/BraveSoftware/Brave-Browser", ".config/BraveSoftware/Brave-Browser-Beta",
+                  ".config/BraveSoftware/Brave-Browser-Nightly",
+                  ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"],
+        "apps": ["brave"], "desktop": ["brave"],
+    },
+    "chrome": {
+        "family": "chromium", "label": "Chrome",
+        "roots": [".config/google-chrome", ".config/google-chrome-beta", ".config/google-chrome-unstable",
+                  ".var/app/com.google.Chrome/config/google-chrome"],
+        "apps": ["chrome"], "desktop": ["google-chrome", "com.google.chrome"],
+    },
+    "chromium": {
+        "family": "chromium", "label": "Chromium",
+        "roots": [".config/chromium", ".var/app/org.chromium.Chromium/config/chromium",
+                  "snap/chromium/common/chromium"],
+        "apps": ["chromium"], "desktop": ["chromium"],
+    },
+    "edge": {
+        "family": "chromium", "label": "Edge",
+        "roots": [".config/microsoft-edge", ".config/microsoft-edge-beta", ".config/microsoft-edge-dev",
+                  ".var/app/com.microsoft.Edge/config/microsoft-edge"],
+        "apps": ["microsoft-edge", "edge", "chromium"], "desktop": ["microsoft-edge", "com.microsoft.edge"],
+    },
+    "vivaldi": {
+        "family": "chromium", "label": "Vivaldi",
+        "roots": [".config/vivaldi", ".config/vivaldi-snapshot", ".var/app/com.vivaldi.Vivaldi/config/vivaldi"],
+        "apps": ["vivaldi", "chromium"], "desktop": ["vivaldi"],
+    },
+    "opera": {
+        "family": "chromium", "label": "Opera",
+        "roots": [".config/opera", ".config/opera-beta", ".config/opera-developer",
+                  ".var/app/com.opera.Opera/config/opera"],
+        "apps": ["opera", "chromium"], "desktop": ["opera"],
+    },
+    "thorium": {
+        "family": "chromium", "label": "Thorium",
+        "roots": [".config/thorium"],
+        "apps": ["thorium", "chromium"], "desktop": ["thorium"],
+    },
+    "firefox": {
+        "family": "firefox", "label": "Firefox",
+        "roots": [".config/mozilla/firefox", ".mozilla/firefox",
+                  ".var/app/org.mozilla.firefox/config/mozilla/firefox", ".var/app/org.mozilla.firefox/.mozilla/firefox",
+                  "snap/firefox/common/.mozilla/firefox"],
+        "desktop": ["firefox"],
+    },
+    "zen": {
+        "family": "firefox", "label": "Zen",
+        "roots": [".zen", ".config/zen", ".var/app/app.zen_browser.zen/.zen"],
+        "desktop": ["zen"],
+    },
+    "librewolf": {
+        "family": "firefox", "label": "LibreWolf",
+        "roots": [".librewolf", ".config/librewolf/librewolf", ".var/app/io.gitlab.librewolf-community/.librewolf"],
+        "desktop": ["librewolf"],
+    },
+    "floorp": {
+        "family": "firefox", "label": "Floorp",
+        "roots": [".floorp", ".var/app/one.ablaze.floorp/.floorp"],
+        "desktop": ["floorp"],
+    },
+    "waterfox": {
+        "family": "firefox", "label": "Waterfox",
+        "roots": [".waterfox", ".var/app/net.waterfox.waterfox/.waterfox"],
+        "desktop": ["waterfox"],
+    },
+}
+
+
+# User-facing messages, in the panel's language (--lang). Keys are stable;
+# `%s`/`%d` placeholders are filled by msg().
+MESSAGES = {
+    "keyring-timeout": ("the keyring is not answering (locked?)",
+                        "le trousseau ne répond pas (verrouillé ?)"),
+    "crypto-missing": ("Python module \"cryptography\" is missing (package python-cryptography)",
+                       "module Python « cryptography » manquant (paquet python-cryptography)"),
+    "db-unreadable": ("unreadable cookie database: %s", "base de cookies illisible : %s"),
+    "decrypt-failed": ("cannot decrypt the %s cookies: the \"%s Safe Storage\" key is missing from the keyring or does not match",
+                       "impossible de déchiffrer les cookies %s : la clé « %s Safe Storage » manque dans le trousseau ou ne correspond pas"),
+    "file-missing": ("create %s with the Cookie header copied from your browser",
+                     "crée %s avec l'en-tête Cookie copié depuis ton navigateur"),
+    "file-unreadable": ("%s is unreadable (a symlink?)", "%s est illisible (lien symbolique ?)"),
+    "file-empty": ("no valid cookie in %s", "aucun cookie valide dans %s"),
+    "file-expired": ("the cookie in %s has expired: copy it again from your browser",
+                     "le cookie de %s a expiré : recopie-le depuis ton navigateur"),
+    "no-usable-cookie": ("no usable c411.org cookie", "aucun cookie c411.org utilisable"),
+    "cookie-too-long": ("c411.org cookies are abnormally long, ignored", "cookies c411.org anormalement longs, ignorés"),
+    "curl-missing": ("curl not found", "curl introuvable"),
+    "curl-failed": ("curl failed (%d)", "curl a échoué (%d)"),
+    "too-long-or-slow": ("c411.org's answer was too long or too slow, ignored",
+                         "réponse de c411.org trop longue ou trop lente, ignorée"),
+    "not-json": ("the answer is not JSON (Cloudflare?)", "la réponse n'est pas du JSON (Cloudflare ?)"),
+    "unexpected": ("unexpected answer from c411.org", "réponse inattendue de c411.org"),
+    "bad-numbers": ("uploaded/downloaded missing or invalid in the answer",
+                    "uploaded/downloaded absents ou invalides dans la réponse"),
+    "unknown-browser": ("unknown browser: %s", "navigateur inconnu : %s"),
+    "no-browser-any": ("no known browser found%s; set Browser to \"File\" in the settings to paste the cookie by hand",
+                       "aucun navigateur connu trouvé%s ; choisis « File » dans les réglages pour coller le cookie à la main"),
+    "no-browser-one": ("no %s profile found%s; set Browser to \"File\" in the settings to paste the cookie by hand",
+                       "aucun profil %s trouvé%s ; choisis « File » dans les réglages pour coller le cookie à la main"),
+    "with-profile": (" with that name", " avec ce nom"),
+    "deadline": ("overall time limit reached, search stopped", "délai global dépassé, recherche interrompue"),
+    "store-expired": ("%s: session expired", "%s : session expirée"),
+    "store-note": ("%s: %s", "%s : %s"),
+    "no-cookie-in": ("no c411.org cookie in %s: log in to the site", "pas de cookie c411.org dans %s : connecte-toi au site"),
+    "session-expired": ("C411 session expired: log in again in your browser",
+                        "session C411 expirée : reconnecte-toi dans ton navigateur"),
+    "file-label": ("File", "Fichier"),
+}
+_lang = ["en"]
+
+
+def msg(key, *args):
+    en, fr = MESSAGES[key]
+    text = fr if _lang[0] == "fr" else en
+    return text % args if args else text
+
+
+_deadline = [None]
+
+
+def remaining():
+    """Seconds left before the whole run must give up (inf when unset)."""
+    return float("inf") if _deadline[0] is None else _deadline[0] - time.monotonic()
+
+
+def step_timeout(limit):
+    return max(1, int(min(limit, remaining())))
+
+
+class Failure(Exception):
+    def __init__(self, kind, message):
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
+
+
+TMP_PREFIX = "c411trend-"
+
+
+def private_tmp_root():
+    """$XDG_RUNTIME_DIR when it is ours and owner-only (tmpfs: the cookie copy
+    never touches a disk), else the system temp dir."""
+    run = os.environ.get("XDG_RUNTIME_DIR")
+    if run:
+        try:
+            st = os.stat(run)
+            if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and not st.st_mode & 0o077:
+                return run
+        except OSError:
+            pass
+    return None
+
+
+def sweep_stale_copies():
+    """Remove cookie copies left behind by a run that was SIGKILLed."""
+    root = private_tmp_root() or tempfile.gettempdir()
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith(TMP_PREFIX):
+            continue
+        path = os.path.join(root, name)
+        try:
+            st = os.lstat(path)
+            if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and time.time() - st.st_mtime > 600:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
+
+
+def copy_db(path):
+    """Copy an SQLite db (and its WAL) aside: the browser holds a lock on it.
+    The copy lives in a 0700 directory that callers remove in `finally`."""
+    tmp = tempfile.mkdtemp(prefix=TMP_PREFIX, dir=private_tmp_root())
+    try:
+        dest = os.path.join(tmp, "cookies.db")
+        shutil.copyfile(path, dest)
+        os.chmod(dest, 0o600)
+        for suffix in ("-wal", "-shm"):
+            if os.path.exists(path + suffix):
+                shutil.copyfile(path + suffix, dest + suffix)
+                os.chmod(dest + suffix, 0o600)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return tmp, dest
+
+
+def valid_cookie(name, value):
+    return (isinstance(name, str) and isinstance(value, str)
+            and COOKIE_NAME.match(name) is not None and COOKIE_VALUE.match(value) is not None)
+
+
+def dedupe(rows):
+    """First occurrence of each cookie name wins; callers order best first.
+    Cookies that are not RFC 6265 clean are dropped, never escaped."""
+    seen, out = set(), []
+    for name, value in rows:
+        if name in seen or not value or not valid_cookie(name, value):
+            continue
+        seen.add(name)
+        out.append((name, value))
+    return out
+
+
+# --- store discovery ---------------------------------------------------------
+
+def chromium_cookie_db(profile_dir):
+    for p in (os.path.join(profile_dir, "Network", "Cookies"), os.path.join(profile_dir, "Cookies")):
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def find_stores(name, profile):
+    """Every cookie store of browser `name`, most recently used first.
+    `profile` narrows to one profile directory; empty means all of them."""
+    spec = BROWSERS[name]
+    stores = []
+    for rel in spec["roots"]:
+        root = os.path.join(HOME, rel)
+        if not os.path.isdir(root):
+            continue
+        # Opera keeps its profile in the root itself, the others in subdirs.
+        dirs = [root] if spec["family"] == "chromium" else []
+        try:
+            dirs += sorted(os.path.join(root, d) for d in os.listdir(root))
+        except OSError:
+            continue
+        for d in dirs:
+            if not os.path.isdir(d):
+                continue
+            base = os.path.basename(d)
+            if spec["family"] == "chromium":
+                db = chromium_cookie_db(d)
+                pname = "Default" if d == root else base
+            else:
+                db = os.path.join(d, "cookies.sqlite")
+                db = db if os.path.isfile(db) else None
+                # Firefox profile dirs are "<salt>.<name>".
+                pname = base.split(".", 1)[1] if "." in base else base
+            if not db:
+                continue
+            if profile and profile not in (base, pname):
+                continue
+            stores.append({"browser": name, "label": spec["label"], "family": spec["family"],
+                           "profile": pname, "path": db, "flatpak": "/.var/app/" in db or "/snap/" in db})
+    stores.sort(key=lambda s: os.path.getmtime(s["path"]), reverse=True)
+    return stores
+
+
+def default_browser():
+    try:
+        out = subprocess.run(["xdg-settings", "get", "default-web-browser"],
+                             capture_output=True, timeout=5, text=True).stdout.strip().lower()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if not out:
+        return None
+    # Longest match first so "google-chrome" is not taken for something shorter.
+    matches = [(len(sub), name) for name, spec in BROWSERS.items() for sub in spec["desktop"] if sub in out]
+    return max(matches)[1] if matches else None
+
+
+def read_last_source():
+    try:
+        with open(LAST_SOURCE, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def write_last_source(store):
+    try:
+        ensure_state_dir()
+        fd = os.open(LAST_SOURCE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(store["path"] + "\n")
+    except OSError:
+        pass
+
+
+def candidate_stores(browser, profile):
+    """Stores to try, in order, for --browser `browser`."""
+    if browser != "auto":
+        return find_stores(browser, profile)
+    order = []
+    default = default_browser()
+    if default:
+        order.append(default)
+    order += [b for b in BROWSERS if b not in order]
+    stores = []
+    for b in order:
+        stores += find_stores(b, profile)
+    last = read_last_source()
+    stores.sort(key=lambda s: 0 if s["path"] == last else 1)  # stable: default browser stays next
+    return stores
+
+
+# --- cookie extraction -------------------------------------------------------
+
+def secret_for(apps):
+    for app in apps:
+        try:
+            out = subprocess.run(["secret-tool", "lookup", "application", app], capture_output=True,
+                                 timeout=step_timeout(10))
+        except FileNotFoundError:
+            return None
+        except subprocess.TimeoutExpired:
+            raise Failure("keyring", msg("keyring-timeout"))
+        secret = out.stdout.rstrip(b"\n")
+        if secret:
+            return secret
+    return None
+
+
+def pbkdf2(password):
+    return hashlib.pbkdf2_hmac("sha1", password, b"saltysalt", 1, 16)
+
+
+def aes_cbc(key, data):
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    except ImportError:
+        raise Failure("crypto", msg("crypto-missing"))
+    if not data or len(data) % 16:
+        return None
+    d = Cipher(algorithms.AES(key), modes.CBC(b" " * 16)).decryptor()
+    plain = d.update(data) + d.finalize()
+    pad = plain[-1]
+    if not 1 <= pad <= 16 or plain[-pad:] != bytes([pad]) * pad:
+        return None
+    return plain[:-pad]
+
+
+def decrypt_chromium(blob, keys, host_key, has_hash):
+    """Try each candidate key. Schema 24+ prefixes the plaintext with
+    sha256(host_key), which proves the key; older schemas fall back to "bad
+    padding or unprintable bytes means wrong key"."""
+    prefix, data = blob[:3], blob[3:]
+    digest = hashlib.sha256(host_key.encode()).digest()
+    for key in keys.get(prefix, []):
+        plain = aes_cbc(key, data)
+        if plain is None:
+            continue
+        if has_hash:
+            if plain[:32] != digest:
+                continue
+            return plain[32:].decode("utf-8", errors="replace")
+        try:
+            text = plain.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if text.isprintable():
+            return text
+    return None
+
+
+def read_rows(path, queries, params):
+    """Run the first query this store's schema accepts, on a private copy."""
+    tmp, db = copy_db(path)
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        try:
+            meta = None
+            try:
+                meta = con.execute("select value from meta where key='version'").fetchone()
+            except sqlite3.Error:
+                pass
+            for sql in queries:
+                try:
+                    return con.execute(sql, params).fetchall(), meta
+                except sqlite3.OperationalError:
+                    continue
+            raise Failure("no-browser", msg("db-unreadable", path))
+        finally:
+            con.close()
+    except sqlite3.DatabaseError:
+        raise Failure("no-browser", msg("db-unreadable", path))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def chromium_cookies(store):
+    now = int((time.time() + CHROMIUM_EPOCH_OFFSET) * 1000000)
+    rows, meta = read_rows(store["path"], [
+        "select name, value, encrypted_value, host_key from cookies where host_key in (?, ?) "
+        "and (expires_utc = 0 or expires_utc > ?) order by last_access_utc desc",
+        "select name, value, encrypted_value, host_key from cookies where host_key in (?, ?) and (expires_utc = 0 or expires_utc > ?)",
+        # Schemas without expiry: the API tells a dead session apart anyway.
+        "select name, value, encrypted_value, host_key from cookies where host_key in (?, ?) and ? is not null",
+    ], (HOST, "." + HOST, now))
+    try:
+        version = int(meta[0]) if meta else 0
+    except (TypeError, ValueError):
+        version = 0
+    if not rows:
+        return []
+    keys = {b"v10": [pbkdf2(b"peanuts")]}
+    if any(bytes(r[2][:3]) == b"v11" for r in rows if r[2]):
+        secret = secret_for(BROWSERS[store["browser"]].get("apps", []))
+        # No keyring entry: Chromium falls back to an empty v11 password.
+        keys[b"v11"] = ([pbkdf2(secret)] if secret else []) + [pbkdf2(b"")]
+    out, failed = [], 0
+    for name, value, enc, host_key in rows:
+        if value:
+            out.append((name, value))
+        elif enc:
+            plain = decrypt_chromium(bytes(enc), keys, host_key, version >= 24)
+            if plain is None:
+                failed += 1
+            else:
+                out.append((name, plain))
+    if failed and not out:
+        raise Failure("keyring", msg("decrypt-failed", store["label"], store["label"]))
+    return dedupe(out)
+
+
+def firefox_cookies(store):
+    rows, _ = read_rows(store["path"], [
+        # Plain (non-container) cookies first, then the freshest.
+        "select name, value, expiry from moz_cookies where host in (?, ?) "
+        "order by (originAttributes = '') desc, lastAccessed desc",
+        "select name, value, expiry from moz_cookies where host in (?, ?)",
+        "select name, value, 0 from moz_cookies where host in (?, ?)",
+    ], (HOST, "." + HOST))
+    now = time.time()
+    live = []
+    for name, value, expiry in rows:
+        try:
+            e = float(expiry or 0)
+        except (TypeError, ValueError):
+            e = 0
+        if e > 1e11:  # newer Firefox stores milliseconds
+            e /= 1000
+        if e == 0 or e > now:
+            live.append((name, value))
+    return dedupe(live)
+
+
+def file_cookie():
+    try:
+        fd = os.open(COOKIE_FILE, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        raise Failure("no-cookie", msg("file-missing", COOKIE_FILE))
+    except OSError:
+        raise Failure("no-cookie", msg("file-unreadable", COOKIE_FILE))
+    with os.fdopen(fd, "rb") as fh:
+        if os.fstat(fh.fileno()).st_mode & 0o077:
+            os.fchmod(fh.fileno(), 0o600)  # it holds a session: owner only
+        raw = fh.read(MAX_COOKIE_HEADER + 1).decode("utf-8", errors="replace").strip()
+    if raw.lower().startswith("cookie:"):
+        raw = raw[7:].strip()
+    pairs = [tuple(p.strip().split("=", 1)) for p in raw.split(";") if "=" in p]
+    cookies = dedupe(pairs)
+    if not cookies:
+        raise Failure("no-cookie", msg("file-empty", COOKIE_FILE))
+    return cookies
+
+
+def store_cookies(store):
+    return chromium_cookies(store) if store["family"] == "chromium" else firefox_cookies(store)
+
+
+# --- API ---------------------------------------------------------------------
+
+def clean_text(text, limit=200):
+    """Printable, single-line, bounded: for anything shown to the user."""
+    text = "".join(ch if ch.isprintable() else " " for ch in str(text))
+    text = " ".join(text.split())
+    return text[:limit]
+
+
+def fetch(cookies, timeout):
+    cookies = [(n, v) for n, v in cookies if valid_cookie(n, v)]  # defence in depth
+    header = "; ".join("%s=%s" % (n, v) for n, v in cookies)
+    if not header:
+        raise Failure("no-cookie", msg("no-usable-cookie"))
+    if len(header) > MAX_COOKIE_HEADER:
+        raise Failure("no-cookie", msg("cookie-too-long"))
+    # The cookie travels in a curl config read from stdin, so it never shows in
+    # `ps`. valid_cookie() already rules out quotes, backslashes and newlines;
+    # escaping stays as a second fence.
+    config = 'header = "Cookie: %s"\n' % header.replace("\\", "\\\\").replace('"', '\\"')
+    argv = [
+        "curl", "-q",  # -q first: never read ~/.curlrc (a `trace` there would dump the cookie)
+        "-sS", "--fail-with-body", "--compressed",
+        "--proto", "=https", "--max-redirs", "0",
+        "--max-filesize", str(MAX_RESPONSE_BYTES),
+        "-m", str(timeout), "-A", UA, "-H", "Accept: application/json",
+        "-K", "-", API,
+    ]
+    with tempfile.TemporaryFile() as err:
+        try:
+            proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
+        except FileNotFoundError:
+            raise Failure("network", msg("curl-missing"))
+        try:
+            proc.stdin.write(config.encode())
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+        body = read_bounded(proc, timeout + 5)
+        err.seek(0)
+        stderr = err.read()[-4096:].decode(errors="replace")
+    if body is None:
+        raise Failure("bad-response", msg("too-long-or-slow"))
+    if proc.returncode != 0:
+        lines = [l for l in stderr.splitlines() if l.strip()]
+        raise Failure("network", clean_text(lines[-1] if lines else msg("curl-failed", proc.returncode)))
+    try:
+        data = json.loads(body)
+    except ValueError:
+        raise Failure("bad-response", msg("not-json"))
+    if not isinstance(data, dict):
+        raise Failure("bad-response", msg("unexpected"))
+    return data
+
+
+def read_bounded(proc, timeout):
+    """stdout of `proc`, or None (process killed) past MAX_RESPONSE_BYTES or `timeout`."""
+    deadline = time.monotonic() + timeout
+    chunks, size = [], 0
+    fd = proc.stdout.fileno()
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        ready, _, _ = select.select([fd], [], [], left)
+        if not ready:
+            break
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            proc.stdout.close()
+            try:
+                proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                break
+            return b"".join(chunks)
+        size += len(chunk)
+        if size > MAX_RESPONSE_BYTES:
+            break
+        chunks.append(chunk)
+    proc.kill()
+    proc.wait()
+    proc.stdout.close()
+    return None
+
+
+def number(v):
+    """A finite, non-negative float, or None. Rejects NaN, inf, negatives,
+    booleans and absurd magnitudes (1e21 bytes is ~900 exbibytes)."""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(f) or f < 0 or f > 1e21:
+        return None
+    return f
+
+
+def to_sample(user):
+    up = number(user.get("uploaded"))
+    down = number(user.get("downloaded"))
+    if up is None or down is None:
+        raise Failure("bad-response", msg("bad-numbers"))
+    ratio = number(user.get("ratio"))
+    if ratio is None:
+        ratio = up / down if down > 0 else None
+    return {
+        "t": int(time.time()),
+        "up": up,
+        "down": down,
+        "ratio": ratio,
+        "credit": number(user.get("uploadCredit")) or 0,
+    }
+
+
+def ensure_state_dir():
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    st = os.stat(STATE_DIR)
+    if st.st_uid == os.getuid() and st.st_mode & 0o077:
+        os.chmod(STATE_DIR, 0o700)
+
+
+class HistoryLock:
+    """flock on a sibling file: serialises appends and compaction between the
+    shell's poll and a manual run."""
+
+    def __enter__(self):
+        ensure_state_dir()
+        self.fd = os.open(HISTORY + ".lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.fd, fcntl.LOCK_UN)
+        os.close(self.fd)
+
+
+def append_sample(sample):
+    line = json.dumps(sample, separators=(",", ":"), allow_nan=False) + "\n"
+    with HistoryLock():
+        fd = os.open(HISTORY, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(line)
+            size = fh.tell()
+        if size > COMPACT_BYTES:
+            compact_history(sample["t"])
+
+
+def thin(samples, now):
+    """Keep every sample from the last RECENT_DAYS, manual ones always, and the
+    latest sample of each THIN_SECONDS bucket before that."""
+    recent_from = now - RECENT_DAYS * 86400
+    keep, buckets = [], {}
+    for s in samples:
+        if s["t"] >= recent_from or s.get("manual"):
+            keep.append(s)
+        else:
+            b = int(s["t"] // THIN_SECONDS)
+            if b not in buckets or buckets[b]["t"] <= s["t"]:
+                buckets[b] = s
+    keep += buckets.values()
+    keep.sort(key=lambda s: s["t"])
+    return keep
+
+
+def compact_history(now):
+    """Rewrite history.jsonl thinned; caller holds HistoryLock. Atomic: a
+    crash leaves either the old file or the new one."""
+    samples = []
+    with open(HISTORY, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                s = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(s, dict) and isinstance(s.get("t"), (int, float)) \
+                    and number(s.get("up")) is not None and number(s.get("down")) is not None:
+                samples.append(s)
+    kept = thin(samples, now)
+    fd, tmp = tempfile.mkstemp(prefix=".history-", dir=STATE_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            for s in kept:
+                fh.write(json.dumps(s, separators=(",", ":"), allow_nan=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, HISTORY)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def store_name(store):
+    return "%s (%s%s)" % (store["label"], store["profile"], ", flatpak" if store["flatpak"] else "")
+
+
+def authenticated(body):
+    return body.get("authenticated") is True and isinstance(body.get("user"), dict)
+
+
+def authenticate(browser, profile, timeout):
+    """Return (api body, source dict). Walks the candidate stores in auto mode."""
+    if browser == "file":
+        body = fetch(file_cookie(), step_timeout(timeout))
+        if not authenticated(body):
+            raise Failure("expired", msg("file-expired", COOKIE_FILE))
+        return body, {"browser": "file", "label": msg("file-label"), "profile": ""}
+
+    if browser != "auto" and browser not in BROWSERS:
+        raise Failure("no-browser", msg("unknown-browser", browser))
+    stores = candidate_stores(browser, profile)
+    if not stores:
+        suffix = msg("with-profile") if profile else ""
+        raise Failure("no-browser", msg("no-browser-any", suffix) if browser == "auto"
+                      else msg("no-browser-one", BROWSERS[browser]["label"], suffix))
+
+    notes, attempts, worst = [], 0, None
+    for store in stores:
+        if remaining() <= 1:
+            notes.append(msg("deadline"))
+            worst = worst or Failure("network", "")
+            break
+        try:
+            cookies = store_cookies(store)
+        except Failure as f:
+            notes.append(msg("store-note", store_name(store), f.message))
+            worst = worst or f
+            continue
+        if not cookies:
+            continue
+        attempts += 1
+        body = fetch(cookies, step_timeout(timeout))  # network errors stop the walk: another store won't help
+        if authenticated(body):
+            write_last_source(store)
+            return body, {"browser": store["browser"], "label": store["label"], "profile": store["profile"]}
+        notes.append(msg("store-expired", store_name(store)))
+        worst = Failure("expired", "")
+        if attempts >= MAX_API_ATTEMPTS:
+            break
+
+    if worst is None:
+        names = sorted({s["label"] for s in stores})
+        raise Failure("no-cookie", msg("no-cookie-in", ", ".join(names)))
+    kind = worst.kind
+    lead = msg("session-expired") if kind == "expired" else notes[0]
+    detail = [n for n in notes if n != lead]
+    raise Failure(kind, lead + ("\n" + "\n".join(detail) if detail else ""))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--browser", default="auto", help="auto | file | " + " | ".join(BROWSERS))
+    ap.add_argument("--profile", default="", help="profile directory (default: all profiles)")
+    ap.add_argument("--timeout", type=int, default=15, help="per-request timeout, seconds")
+    ap.add_argument("--deadline", type=int, default=DEFAULT_DEADLINE, help="whole-run limit, seconds")
+    ap.add_argument("--lang", default="en", choices=["en", "fr"], help="language of the messages")
+    ap.add_argument("--no-record", action="store_true", help="fetch and print, but do not append to history")
+    ap.add_argument("--list", action="store_true", help="list the cookie stores that would be tried, then exit")
+    args = ap.parse_args()
+    browser = args.browser.lower()
+    profile = args.profile.strip()
+    _lang[0] = args.lang
+    _deadline[0] = time.monotonic() + max(5, args.deadline)
+    # SIGTERM/SIGHUP unwind through the `finally` blocks, so no cookie copy
+    # outlives a killed run; SIGKILL leftovers are swept on the next start.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda signum, frame: sys.exit(128 + signum))
+    sweep_stale_copies()
+    try:
+        if args.list:
+            stores = candidate_stores(browser, profile) if browser != "file" else []
+            print(json.dumps({"ok": True, "default": default_browser(),
+                              "stores": [{"browser": s["browser"], "profile": s["profile"], "path": s["path"]} for s in stores]},
+                             ensure_ascii=False))
+            return 0
+        body, source = authenticate(browser, profile, args.timeout)
+        user = body["user"]
+        sample = to_sample(user)
+        if not args.no_record:
+            append_sample(sample)
+        print(json.dumps({
+            "ok": True,
+            "sample": sample,
+            "user": {
+                "username": clean_text(user.get("username") or user.get("name") or "", 64),
+                "canDownload": user.get("canDownload") if isinstance(user.get("canDownload"), bool) else None,
+                "minRatioForDownload": number(user.get("minRatioForDownload")),
+            },
+            "source": source,
+            "history": HISTORY,
+        }))
+    except Failure as f:
+        print(json.dumps({"ok": False, "error": f.kind, "message": f.message}))
+        return 1
+    except Exception as e:  # never leak a traceback that could include cookie material
+        print(json.dumps({"ok": False, "error": "internal", "message": type(e).__name__}))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

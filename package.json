@@ -1,0 +1,14 @@
+{
+  "name": "c411trend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "C411 upload/download/ratio history and forecasts in the Omarchy bar.",
+  "license": "WTFPL",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs && python3 -m unittest discover -s test",
+    "test:model": "node --test test/*.test.mjs",
+    "test:fetch": "python3 -m unittest discover -s test -v",
+    "baseline": "node test/marketplace-baseline.mjs"
+  }
+}

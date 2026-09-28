@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "id": "x99.c411trend",
+  "name": "C411 Trend",
+  "version": "1.0.0",
+  "author": "XNinety9",
+  "license": "WTFPL",
+  "description": "C411 private tracker stats in the Omarchy bar: upload, download and ratio history, charts, forecasts and a what-if calculator (\"20 TB uploaded in 2 months at this pace\"). Reads your c411.org session cookie from your browser, locally; see SECURITY.md.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "C411 Trend",
+    "description": "C411 upload, download and ratio with history, forecasts and what-if targets.",
+    "category": "Info",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "language": "Auto",
+      "browser": "Auto",
+      "browserProfile": "",
+      "refreshIntervalMin": 30,
+      "forecastWindowDays": 14,
+      "uploadTargetTo": 0,
+      "ratioTarget": 0,
+      "defaultRange": "30d",
+      "barFormat": "{ratio}",
+      "panelWidth": 672
+    },
+    "schema": [
+      {
+        "key": "language",
+        "type": "enum",
+        "label": "Language",
+        "options": [
+          "Auto",
+          "English",
+          "Français"
+        ],
+        "defaultValue": "Auto",
+        "description": "Language of the panel, bar label and messages. Auto follows your session locale (LANG): French when it starts with fr, US English otherwise."
+      },
+      {
+        "key": "browser",
+        "type": "enum",
+        "label": "Browser",
+        "options": [
+          "Auto",
+          "Brave",
+          "Chrome",
+          "Chromium",
+          "Edge",
+          "Vivaldi",
+          "Opera",
+          "Thorium",
+          "Firefox",
+          "Zen",
+          "LibreWolf",
+          "Floorp",
+          "Waterfox",
+          "File"
+        ],
+        "defaultValue": "Auto",
+        "description": "Where to read the c411.org session cookie. Auto: your default browser first, then every other one (native, Flatpak, Snap) until a live session turns up. File: ~/.config/c411trend/cookie, a Cookie header pasted from the browser's developer tools."
+      },
+      {
+        "key": "browserProfile",
+        "type": "string",
+        "label": "Browser profile",
+        "defaultValue": "",
+        "description": "Profile directory (Default, Profile 1, default-release…). Empty = every profile, most recently used first."
+      },
+      {
+        "key": "refreshIntervalMin",
+        "type": "integer",
+        "label": "Poll interval (minutes)",
+        "min": 5,
+        "max": 1440,
+        "step": 5,
+        "defaultValue": 30,
+        "description": "One request to /api/auth/me per interval. Each reading is appended to ~/.local/state/c411trend/history.jsonl."
+      },
+      {
+        "key": "forecastWindowDays",
+        "type": "integer",
+        "label": "Pace window (days)",
+        "min": 1,
+        "max": 365,
+        "step": 1,
+        "defaultValue": 14,
+        "description": "Forecasts extend the linear trend of this period. Short reacts fast, long stays steady."
+      },
+      {
+        "key": "uploadTargetTo",
+        "type": "string",
+        "label": "Upload goal (TB)",
+        "defaultValue": "0",
+        "description": "Always listed in the forecast with its estimated date. 0 = automatic milestones only. The what-if field answers one-off questions."
+      },
+      {
+        "key": "ratioTarget",
+        "type": "string",
+        "label": "Ratio goal",
+        "defaultValue": "0",
+        "description": "Always listed in the forecast with its estimated date. 0 = automatic milestones only."
+      },
+      {
+        "key": "defaultRange",
+        "type": "enum",
+        "label": "Default chart range",
+        "options": [
+          "24h",
+          "7d",
+          "30d",
+          "all"
+        ],
+        "defaultValue": "30d"
+      },
+      {
+        "key": "barFormat",
+        "type": "string",
+        "label": "Bar label",
+        "defaultValue": "{ratio}",
+        "description": "Template for the text next to the icon; mix any keys with free text, e.g. \"↑{up} · {ratio}\" or \"{ratio} ({ratio7d}) · goal {goal}\". Totals: {up} {down} {ratio} {credit} {buffer}. Pace: {rate} {downrate}. Change: {up24h} {up7d} {up30d} {down24h} {down7d} {down30d} {ratio24h} {ratio7d} {ratio30d}. Targets: {next} {nexteta} {goal} {ratiogoal}. Other: {user}. {{ and }} print braces. Empty = icon only."
+      },
+      {
+        "key": "panelWidth",
+        "type": "integer",
+        "label": "Panel width (px)",
+        "min": 380,
+        "max": 1400,
+        "step": 10,
+        "defaultValue": 672
+      }
+    ]
+  }
+}

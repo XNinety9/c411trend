@@ -1,0 +1,24 @@
+# Dependencies and caches
+node_modules/
+__pycache__/
+*.py[cod]
+
+# Marketplace scanner checkout used by `npm run baseline` / CI
+.marketplace/
+
+# Local data that must never be committed
+history.jsonl
+*.jsonl
+cookie
+*.cookie
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
