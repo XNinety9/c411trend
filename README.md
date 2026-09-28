@@ -18,6 +18,18 @@ omarchy plugin add https://github.com/XNinety9/c411trend.git --enable
 Be logged in to c411.org in your browser. The widget finds the session by
 itself (see [Browsers](#browsers)).
 
+## Uninstall
+
+```bash
+omarchy plugin remove x99.c411trend
+```
+
+This deletes `~/.config/omarchy/plugins/x99.c411trend/` and drops the widget
+from the bar. Your history stays in `~/.local/state/c411trend/` (and, with the
+`File` browser setting, your pasted cookie in `~/.config/c411trend/`), so a
+reinstall picks up where you left off; delete those two directories to erase
+everything. The plugin never touches your browser's data.
+
 ## What you get
 
 - **Bar pill** with your ratio, or any composition of values you like (see

@@ -19,6 +19,18 @@ omarchy plugin add https://github.com/XNinety9/c411trend.git --enable
 Il suffit d'être connecté à c411.org dans ton navigateur : le widget trouve la
 session tout seul (voir [Navigateurs](#navigateurs)).
 
+## Désinstallation
+
+```bash
+omarchy plugin remove x99.c411trend
+```
+
+Cela supprime `~/.config/omarchy/plugins/x99.c411trend/` et retire le widget de
+la barre. Ton historique reste dans `~/.local/state/c411trend/` (ainsi que ton
+cookie collé dans `~/.config/c411trend/`, si tu utilises le réglage `File`) :
+une réinstallation reprend là où tu en étais. Supprime ces deux dossiers pour
+tout effacer. Le plugin ne touche jamais aux données de ton navigateur.
+
 ## Ce que tu obtiens
 
 - **Une pastille dans la barre** avec ton ratio, ou la composition de valeurs
