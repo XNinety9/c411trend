@@ -440,3 +440,49 @@ test("what-if input is bounded", () => {
   Model.parseTargets("ratio " + " ".repeat(5000) + "5");   // no pathological backtracking
   assert.ok(Date.now() - t0 < 50);
 });
+
+// --- Regression: huge "levels off near 61495463179088" -------------------------
+
+// Real-world shape: ~4 TB of upload growing, download frozen at ~1.1 TB,
+// readings at irregular times over four days.
+function frozenDownload() {
+  const out = [];
+  let t = 1_790_400_000, up = 4.3 * TiB;
+  const down = 1220388150663;
+  for (let i = 0; i < 94; i++) {
+    t += 1800 + ((i * 7919) % 1300);
+    up += 80 * GiB * (t % 5000) / 86400 / 2.5;
+    out.push({ t, up, down, ratio: up / down, credit: 0 });
+  }
+  return out;
+}
+
+test("a flat counter has a zero slope, even at 10^12 bytes", () => {
+  const s = frozenDownload();
+  assert.equal(Model.slope(s, "down"), 0);
+  assert.equal(Model.rates(s, s.at(-1).t, 14).down, 0);
+});
+
+test("paces below the noise floor count as zero", () => {
+  const s = steady({ downPerDay: Model.MIN_PACE / 2 });
+  assert.equal(Model.rates(s, s.at(-1).t, 7).down, 0);
+  const real = steady({ downPerDay: 2 * Model.MIN_PACE });
+  assert.ok(Model.rates(real, real.at(-1).t, 7).down > 0);
+});
+
+test("what-if answers never print an absurd ratio ceiling", () => {
+  const cases = [frozenDownload(), steady({ downPerDay: 2 * Model.MIN_PACE })];  // none / ~2 MiB a day
+  for (const s of cases) {
+    const now = s.at(-1).t;
+    for (const lang of ["en", "fr"]) {
+      const L = Model.locale(lang);
+      for (const q of ["ratio 5", "ratio 50", "5"]) {
+        for (const target of L.targets(q).targets) {
+          const d = L.describe(Model.simulate(s, now, 14, target), now, 14);
+          assert.doesNotMatch(d.detail, /\d{5,}/, `${lang} ${q}: ${d.detail}`);
+          if (target.metric === "ratio") assert.doesNotMatch(d.detail, /levels off|plafonne/, `${lang} ${q}`);
+        }
+      }
+    }
+  }
+});

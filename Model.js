@@ -370,12 +370,18 @@ function since(samples, t0) {
 }
 
 // Least-squares slope of `metric` against time, per second.
+// Both axes are taken relative to the first sample: counters are ~10^12
+// bytes, and summing their raw squares loses enough precision that a flat
+// series comes out with a tiny non-zero slope.
 function slope(samples, metric) {
   var n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0
   var t0 = samples.length ? samples[0].t : 0
+  var y0 = null
   for (var i = 0; i < samples.length; i++) {
-    var y = valueOf(samples[i], metric)
-    if (y === null || y === undefined || isNaN(y)) continue
+    var v = valueOf(samples[i], metric)
+    if (v === null || v === undefined || isNaN(v)) continue
+    if (y0 === null) y0 = v
+    var y = v - y0
     var x = samples[i].t - t0
     n++; sx += x; sy += y; sxx += x * x; sxy += x * y
   }
@@ -383,6 +389,15 @@ function slope(samples, metric) {
   var den = n * sxx - sx * sx
   if (den <= 0) return null
   return (n * sxy - sx * sy) / den
+}
+
+// Below this a pace is rounding noise, not torrent activity; it counts as
+// zero so it can never become a divisor (a ratio "levelling off near 10^13").
+var MIN_PACE = 1024 * 1024  // bytes per day
+
+function pace(perSecond) {
+  var perDay = Math.max(0, perSecond) * DAY
+  return perDay < MIN_PACE ? 0 : perDay
 }
 
 // Upload and download rates over the last `windowDays`, in bytes per day.
@@ -397,8 +412,8 @@ function rates(samples, now, windowDays) {
   var up = slope(win, "up"), down = slope(win, "down")
   if (up === null || down === null) return null
   return {
-    up: Math.max(0, up) * DAY,
-    down: Math.max(0, down) * DAY,
+    up: pace(up),
+    down: pace(down),
     samples: win.length,
     spanDays: span / DAY,
     partial: span < windowDays * DAY * 0.9
@@ -689,6 +704,7 @@ var UNIT_POWERS = {
   p: 5, pb: 5, pib: 5, po: 5
 }
 var MAX_TARGET_BYTES = 1e21
+var MAX_SHOWN_CEILING = 1000
 var MAX_TARGET_RATIO = 1e6
 
 function ratioTarget(n, l) {
@@ -823,7 +839,9 @@ function describeSimulation(sim, now, windowDays, l) {
       ? tr(l, "simPaceLast", [speed, formatDuration(sim.rates.spanDays * DAY, l)])
       : tr(l, "simPaceDays", [speed, windowDays])
   }
-  var ceiling = sim.ceiling !== null && sim.ceiling !== undefined ? tr(l, "simCeiling", [formatRatio(sim.ceiling, l)]) : ""
+  // A ceiling in the thousands says "unbounded" better by being left out.
+  var ceiling = sim.ceiling !== null && sim.ceiling !== undefined && sim.ceiling <= MAX_SHOWN_CEILING
+    ? tr(l, "simCeiling", [formatRatio(sim.ceiling, l)]) : ""
   switch (sim.status) {
   case "no-data":
     return { headline: tr(l, "simNoDataHead"), detail: tr(l, "simNoDataDetail") }
@@ -899,7 +917,7 @@ if (typeof module !== "undefined") {
     downsample: downsample, chartModel: chartModel, nearest: nearest, formatMetric: formatMetric,
     deltaOver: deltaOver, formatDelta: formatDelta, formatBar: formatBar, formatDuration: formatDuration,
     TILE_ORDER: TILE_ORDER, parseTarget: parseTarget, parseTargets: parseTargets,
-    MAX_BAR_CHARS: MAX_BAR_CHARS, MAX_TARGET_CHARS: MAX_TARGET_CHARS, firstReached: firstReached, simulate: simulate,
+    MAX_BAR_CHARS: MAX_BAR_CHARS, MIN_PACE: MIN_PACE, MAX_SHOWN_CEILING: MAX_SHOWN_CEILING, MAX_TARGET_CHARS: MAX_TARGET_CHARS, firstReached: firstReached, simulate: simulate,
     describeSimulation: describeSimulation
   }
 }

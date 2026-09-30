@@ -135,7 +135,7 @@ Panel {
     function toggle(): void { root.toggle() }
     function refresh(): string { svc.refresh(); return "ok" }
     function status(): string { return svc.summaryText }
-    function version(): string { return "1.0.0" }
+    function version(): string { return "1.0.1" }
     function samples(): string { return String(svc.samples.length) }
     function forecast(): string {
       var f = svc.forecast
