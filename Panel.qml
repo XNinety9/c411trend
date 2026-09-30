@@ -61,6 +61,15 @@ Panel {
     return root.i18n.tr("pace", [span, root.i18n.rate(r.up), root.i18n.rate(r.down)])
   }
 
+  // Pace per calendar day over the pace window, starting at the first day
+  // that has readings (leading empty days would only squeeze the bars).
+  readonly property var paceDays: {
+    var all = Model.dailyPace(svc.samples, svc.now, svc.forecastWindowDays)
+    var i = 0
+    while (i < all.length && all[i].up === null) i++
+    return all.slice(i)
+  }
+
   // What-if: the target typed in the panel, and how the current pace meets it.
   // A bare number is read both ways (TB and ratio), so there is no mode to pick.
   // Kept in shell.json, so bounded like the field that edits it.
@@ -135,7 +144,7 @@ Panel {
     function toggle(): void { root.toggle() }
     function refresh(): string { svc.refresh(); return "ok" }
     function status(): string { return svc.summaryText }
-    function version(): string { return "1.0.1" }
+    function version(): string { return "1.1.0" }
     function samples(): string { return String(svc.samples.length) }
     function forecast(): string {
       var f = svc.forecast
@@ -326,6 +335,14 @@ Panel {
           wrapMode: Text.Wrap
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
+        }
+
+        PaceChart {
+          Layout.fillWidth: true
+          Layout.preferredHeight: Style.space(70)
+          visible: root.paceDays.length >= 2
+          days: root.paceDays
+          average: svc.rates ? svc.rates.up : 0
         }
 
         GridLayout {
@@ -528,6 +545,110 @@ Panel {
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onClicked: root.setMetric(tile.metricKey)
+    }
+  }
+
+  // Daily pace as bars (upload in the accent colour, download narrow and dim),
+  // the forecast pace as a dashed line; hovering a day shows its figures.
+  component PaceChart: Item {
+    id: pc
+    property var days: []
+    property real average: 0
+    property int hovered: -1
+    readonly property real plotH: Math.max(1, height - caption.implicitHeight - Style.space(4))
+    readonly property real maxV: {
+      var m = average
+      for (var i = 0; i < days.length; i++)
+        if (days[i].up !== null) m = Math.max(m, days[i].up, days[i].down)
+      return m > 0 ? m * 1.1 : 1
+    }
+    readonly property var hoveredDay: hovered >= 0 && hovered < days.length ? days[hovered] : null
+
+    onDaysChanged: canvas.requestPaint()
+    onAverageChanged: canvas.requestPaint()
+    onHoveredChanged: canvas.requestPaint()
+    onWidthChanged: canvas.requestPaint()
+    onPlotHChanged: canvas.requestPaint()
+
+    Canvas {
+      id: canvas
+      width: parent.width
+      height: pc.plotH
+      antialiasing: true
+      onPaint: {
+        var ctx = getContext("2d")
+        ctx.reset()
+        var n = pc.days.length
+        if (n === 0) return
+        var W = width, H = height - 1, slot = W / n
+        var fg = root.foreground, ac = root.accent
+        function y(v) { return H - v / pc.maxV * H }
+
+        ctx.strokeStyle = Qt.rgba(fg.r, fg.g, fg.b, 0.12)
+        ctx.lineWidth = 1
+        ctx.beginPath(); ctx.moveTo(0, H + 0.5); ctx.lineTo(W, H + 0.5); ctx.stroke()
+
+        for (var i = 0; i < n; i++) {
+          var d = pc.days[i]
+          if (d.up === null) continue
+          var hot = i === pc.hovered
+          // Bars stay slim when there are only a few days: capped, centred.
+          var upW = Math.min(slot * 0.5, Style.space(24))
+          var downW = Math.min(slot * 0.17, Style.space(8))
+          var gap = Math.min(slot * 0.03, Style.space(2))
+          var x = i * slot + (slot - upW - (d.down > 0 ? gap + downW : 0)) / 2
+          ctx.fillStyle = Qt.rgba(ac.r, ac.g, ac.b, hot ? 1 : 0.7)
+          ctx.fillRect(x, y(d.up), upW, H - y(d.up))
+          if (d.down > 0) {
+            ctx.fillStyle = Qt.rgba(fg.r, fg.g, fg.b, hot ? 0.7 : 0.4)
+            ctx.fillRect(x + upW + gap, y(d.down), downW, H - y(d.down))
+          }
+        }
+
+        // Forecast pace (the regression the forecasts use), dashed by hand
+        // (Canvas setLineDash is unreliable in Qt).
+        if (pc.average > 0) {
+          var ay = Math.round(y(pc.average)) + 0.5
+          var dash = Style.space(4), gap = Style.space(3)
+          ctx.strokeStyle = Qt.rgba(fg.r, fg.g, fg.b, 0.55)
+          ctx.lineWidth = 1
+          for (var dx = 0; dx < W; dx += dash + gap) {
+            ctx.beginPath(); ctx.moveTo(dx, ay); ctx.lineTo(Math.min(W, dx + dash), ay); ctx.stroke()
+          }
+        }
+      }
+    }
+
+    MouseArea {
+      width: parent.width
+      height: pc.plotH
+      hoverEnabled: true
+      onPositionChanged: function(mouse) {
+        var n = Math.max(1, pc.days.length)
+        pc.hovered = Math.max(0, Math.min(n - 1, Math.floor(mouse.x / (width / n))))
+      }
+      onExited: pc.hovered = -1
+    }
+
+    Text {
+      id: caption
+      anchors.bottom: parent.bottom
+      width: parent.width
+      textFormat: Text.PlainText
+      elide: Text.ElideRight
+      color: pc.hoveredDay ? root.foreground : root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      text: {
+        var i18n = root.i18n
+        if (pc.hoveredDay) {
+          var day = i18n.shortDate(pc.hoveredDay.t, svc.now)
+          return pc.hoveredDay.up === null ? i18n.tr("paceDayNone", [day])
+            : i18n.tr("paceDay", [day, i18n.rate(pc.hoveredDay.up), i18n.rate(pc.hoveredDay.down)])
+        }
+        if (pc.days.length === 0) return ""
+        return i18n.tr("paceDaily", [i18n.shortDate(pc.days[0].t, svc.now), i18n.shortDate(pc.days[pc.days.length - 1].t, svc.now)])
+      }
     }
   }
 

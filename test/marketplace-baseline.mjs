@@ -3,12 +3,21 @@
 // report `passed` with no findings and no capabilities.
 //
 //   MARKETPLACE_DIR=/path/to/omarchy-plugin-marketplace node test/marketplace-baseline.mjs
-import { readFileSync, readdirSync, lstatSync } from "node:fs";
+import { readFileSync, readdirSync, lstatSync, existsSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
-const scripts = resolve(process.env.MARKETPLACE_DIR || "", "scripts");
+const root0 = resolve(fileURLToPath(new URL("..", import.meta.url)));
+// Default: the pinned checkout in .marketplace/ (git-ignored), as in CI.
+const scripts = resolve(process.env.MARKETPLACE_DIR || join(root0, ".marketplace"), "scripts");
+if (!existsSync(join(scripts, "security-baseline-analysis.mjs"))) {
+  console.error(`marketplace scanner not found in ${scripts}\n` +
+    "Check it out first (the commit CI pins):\n" +
+    "  git clone https://github.com/omacom/omarchy-plugin-marketplace.git .marketplace\n" +
+    "  git -C .marketplace checkout d45af9a928b7f16278707e093c8b6265192ff00f");
+  process.exit(2);
+}
 const { buildSecurityBaseline } = await import(pathToFileURL(join(scripts, "security-baseline-analysis.mjs")));
 const { isSecurityScanPath } = await import(pathToFileURL(join(scripts, "security-baseline-scope.mjs")));
 

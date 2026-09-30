@@ -49,6 +49,9 @@ var EN = {
     paceOverPartial: "over the last {0} (all there is so far)",
     paceOver: "over {0} days",
     pace: "Pace {0}: ↑ {1} · ↓ {2}",
+    paceDaily: "Pace per day, {0} – {1} · dashed line: forecast pace",
+    paceDay: "{0}: ↑ {1} · ↓ {2}",
+    paceDayNone: "{0}: no readings",
     outOfReach: "out of reach at this pace",
     reached: "reached",
     forecast: "FORECAST",
@@ -142,6 +145,9 @@ var FR = {
     paceOverPartial: "sur les {0} disponibles",
     paceOver: "sur {0} jours",
     pace: "Rythme {0} : ↑ {1} · ↓ {2}",
+    paceDaily: "Rythme par jour, du {0} au {1} · pointillés : rythme des prévisions",
+    paceDay: "{0} : ↑ {1} · ↓ {2}",
+    paceDayNone: "{0} : pas de relevé",
     outOfReach: "hors d'atteinte à ce rythme",
     reached: "atteint",
     forecast: "PRÉVISIONS",
@@ -592,6 +598,55 @@ function formatMetric(metric, v, l) {
 }
 
 // Change over the last `days`: {delta, from} or null when history is shorter.
+// Local midnight at or before `t`.
+function dayStart(t) {
+  var d = new Date(t * 1000)
+  d.setHours(0, 0, 0, 0)
+  return d.getTime() / 1000
+}
+
+// Upload and download pace for each of the last `days` calendar days, in
+// bytes per day: [{t (local midnight), up, down, covered (seconds)}], oldest
+// first. Each interval between two readings is spread over the days it
+// overlaps in proportion to time, so a night with the PC off still lands on
+// the right days. A day with less than MIN_COVERAGE of readings gets
+// up/down = null: no bar rather than a guess.
+var MIN_COVERAGE = 3600
+
+function dailyPace(samples, now, days) {
+  var first = dayStart(now) - (Math.max(1, days) - 1) * DAY
+  var out = []
+  // Walk day boundaries with Date so DST days (23 h / 25 h) stay aligned.
+  for (var d = new Date(first * 1000); d.getTime() / 1000 <= now; d.setDate(d.getDate() + 1)) {
+    var start = d.getTime() / 1000
+    var next = new Date(d.getTime()); next.setDate(next.getDate() + 1)
+    out.push({ t: start, end: next.getTime() / 1000, up: 0, down: 0, covered: 0 })
+  }
+  for (var i = 1; i < samples.length; i++) {
+    var a = samples[i - 1], b = samples[i]
+    var span = b.t - a.t
+    if (!(span > 0) || b.t <= first) continue
+    var du = Math.max(0, b.up - a.up), dd = Math.max(0, b.down - a.down)
+    for (var k = 0; k < out.length; k++) {
+      var lo = Math.max(a.t, out[k].t), hi = Math.min(b.t, out[k].end)
+      if (hi <= lo) continue
+      var share = (hi - lo) / span
+      out[k].up += du * share
+      out[k].down += dd * share
+      out[k].covered += hi - lo
+    }
+  }
+  return out.map(function(day) {
+    var ok = day.covered >= MIN_COVERAGE
+    return {
+      t: day.t,
+      up: ok ? pace(day.up / day.covered) : null,
+      down: ok ? pace(day.down / day.covered) : null,
+      covered: day.covered
+    }
+  })
+}
+
 function deltaOver(samples, metric, now, days) {
   if (samples.length < 2) return null
   var last = samples[samples.length - 1]
@@ -915,7 +970,7 @@ if (typeof module !== "undefined") {
     projectAt: projectAt, timeToReach: timeToReach, niceStep: niceStep, nextRound: nextRound,
     uploadMilestones: uploadMilestones, ratioMilestones: ratioMilestones, forecast: forecast,
     downsample: downsample, chartModel: chartModel, nearest: nearest, formatMetric: formatMetric,
-    deltaOver: deltaOver, formatDelta: formatDelta, formatBar: formatBar, formatDuration: formatDuration,
+    deltaOver: deltaOver, dailyPace: dailyPace, dayStart: dayStart, MIN_COVERAGE: MIN_COVERAGE, formatDelta: formatDelta, formatBar: formatBar, formatDuration: formatDuration,
     TILE_ORDER: TILE_ORDER, parseTarget: parseTarget, parseTargets: parseTargets,
     MAX_BAR_CHARS: MAX_BAR_CHARS, MIN_PACE: MIN_PACE, MAX_SHOWN_CEILING: MAX_SHOWN_CEILING, MAX_TARGET_CHARS: MAX_TARGET_CHARS, firstReached: firstReached, simulate: simulate,
     describeSimulation: describeSimulation

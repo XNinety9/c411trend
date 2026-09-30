@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "x99.c411trend",
   "name": "C411 Trend",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": "XNinety9",
   "license": "WTFPL",
   "description": "C411 private tracker stats in the Omarchy bar: upload, download and ratio history, charts, forecasts and a what-if calculator (\"20 TB uploaded in 2 months at this pace\"). Reads your c411.org session cookie from your browser, locally; see SECURITY.md.",

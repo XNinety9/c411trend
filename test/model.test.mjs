@@ -486,3 +486,48 @@ test("what-if answers never print an absurd ratio ceiling", () => {
     }
   }
 });
+
+// --- Daily pace chart ------------------------------------------------------------
+
+test("dailyPace: a steady seeder gets the same bar every full day", () => {
+  const s = steady({ days: 10, upPerDay: 50 * GiB, downPerDay: 10 * GiB });
+  const now = s.at(-1).t;
+  const days = Model.dailyPace(s, now, 7);
+  assert.equal(days.length, 7);
+  for (const d of days) {
+    assert.equal(d.t, Model.dayStart(d.t));                 // local midnights
+    if (d.covered < 20 * 3600) continue;                     // today may be partial
+    assert.ok(Math.abs(d.up - 50 * GiB) < 1, `up ${d.up}`);
+    assert.ok(Math.abs(d.down - 10 * GiB) < 1, `down ${d.down}`);
+  }
+});
+
+test("dailyPace: a gap is spread over the days it spans, empty days get no bar", () => {
+  const day0 = Model.dayStart(1_790_400_000) + 3 * DAY;     // some local midnight
+  const s = [
+    { t: day0 + 6 * 3600, up: 0, down: 0 },
+    { t: day0 + 18 * 3600, up: 60 * GiB, down: 0 },          // 12 h: 60 GiB -> 120 GiB/day
+    // PC off from day0 18:00 to day0+1 18:00: 24 h, 100 GiB, spread by time:
+    // 6 h (25 GiB) on day0, 18 h (75 GiB) on day0+1.
+    { t: day0 + DAY + 18 * 3600, up: 160 * GiB, down: 0 },
+    // Nothing on day0+2; one reading on day0+3 closes a 24 h+ gap.
+  ];
+  const now = day0 + 3 * DAY + 12 * 3600;
+  const days = Model.dailyPace(s, now, 4);
+  assert.deepEqual(days.map((d) => d.t), [day0, day0 + DAY, day0 + 2 * DAY, day0 + 3 * DAY]);
+  // day0: 60 GiB over 12 h + 25 GiB over 6 h -> 85 GiB over 18 h.
+  assert.ok(Math.abs(days[0].up - 85 * GiB / 18 * 24) < 1);
+  // day0+1: 75 GiB over its first 18 h.
+  assert.ok(Math.abs(days[1].up - 75 * GiB / 18 * 24) < 1);
+  assert.equal(days[2].up, null);
+  assert.equal(days[3].up, null);
+});
+
+test("dailyPace: counters that go backwards never make negative bars", () => {
+  const t = Model.dayStart(1_790_400_000) + 2 * DAY;
+  const s = [{ t, up: 10 * GiB, down: 5 * GiB }, { t: t + 6 * 3600, up: 2 * GiB, down: 1 * GiB }];
+  const [d] = Model.dailyPace(s, t + 7 * 3600, 1);
+  assert.equal(d.up, 0);
+  assert.equal(d.down, 0);
+  assert.deepEqual(Model.dailyPace([], t, 3).map((x) => x.up), [null, null, null]);
+});

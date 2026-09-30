@@ -42,6 +42,8 @@ tout effacer. Le plugin ne touche jamais aux données de ton navigateur.
   - les prochains paliers ronds d'upload et de ratio, avec la date estimée ;
   - tes objectifs personnels (`uploadTargetTo`, `ratioTarget`), marqués ◆ ;
   - l'upload, le download et le ratio prévus à 30, 90 et 365 jours ;
+  - le rythme jour par jour en petit histogramme, upload et download, avec le
+    rythme des prévisions en pointillés (survole un jour pour ses chiffres) ;
   - la tendance prolongée en pointillés après « maintenant » sur la courbe.
 - **Et si…** : tape une cible et lis quand tu l'atteindras à ton rythme actuel.
   - `10 To`, `850 Go`, `1,5 TB` : un volume d'upload ;

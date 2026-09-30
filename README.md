@@ -41,6 +41,8 @@ everything. The plugin never touches your browser's data.
   - the next round upload figures and ratio steps, with the estimated date;
   - your own targets (`uploadTargetTo`, `ratioTarget`), marked ◆;
   - projected upload, download and ratio in 30, 90 and 365 days;
+  - the pace per day as a small bar chart, upload and download, with the
+    forecast pace dashed across it (hover a day for its figures);
   - the trend continued as a dashed line past "now" on the chart.
 - **What if**: type a target and read when you get there at the current pace.
   - `10 TB`, `850 GB`, `1.5 To`: an upload amount;
