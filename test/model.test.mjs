@@ -531,3 +531,80 @@ test("dailyPace: counters that go backwards never make negative bars", () => {
   assert.equal(d.down, 0);
   assert.deepEqual(Model.dailyPace([], t, 3).map((x) => x.up), [null, null, null]);
 });
+
+// --- Tracker-side counter drops (crash, restore from backup) ----------------------
+
+// A steady seeder (+50 GiB/day up, +10 down) whose tracker loses a week:
+// on day 10 both counters fall back by what days 3–10 had added.
+function rollback() {
+  const s = steady({ days: 14, upPerDay: 50 * GiB, downPerDay: 10 * GiB });
+  const cut = s.findIndex((x) => x.t >= s[0].t + 10 * DAY);
+  return s.map((x, i) => (i < cut ? x : { ...x, up: x.up - 350 * GiB, down: x.down - 70 * GiB, ratio: (x.up - 350 * GiB) / (x.down - 70 * GiB) }));
+}
+
+test("continuous: increases only, ending on the real counter", () => {
+  const s = rollback();
+  const c = Model.continuous(s);
+  assert.equal(c.length, s.length);
+  assert.equal(c.at(-1).up, s.at(-1).up);
+  for (let i = 1; i < c.length; i++) assert.ok(c[i].up >= c[i - 1].up && c[i].down >= c[i - 1].down);
+  assert.deepEqual(Model.continuous([]), []);
+});
+
+test("a tracker-side drop does not turn the pace negative", () => {
+  const s = rollback();
+  const r = Model.rates(s, s.at(-1).t, 14);
+  assert.ok(Math.abs(r.up - 50 * GiB) < 0.5 * GiB, `up ${r.up / GiB}`);
+  assert.ok(Math.abs(r.down - 10 * GiB) < 0.2 * GiB, `down ${r.down / GiB}`);
+  // Raw least squares, drop included, is far off (about half the real pace).
+  assert.ok(Math.abs(Model.slope(s, "up") * DAY - 50 * GiB) > 15 * GiB);
+});
+
+test("after a drop, an upload target ahead is reachable again, with a reason that holds", () => {
+  const s = rollback();
+  const now = s.at(-1).t;
+  const sim = Model.simulate(s, now, 14, { metric: "up", value: s.at(-1).up + 100 * GiB });
+  assert.equal(sim.status, "eta");
+  assert.ok(Math.abs((sim.when - now) / DAY - 2) < 0.05);
+  for (const lang of ["en", "fr"]) {
+    const d = Model.locale(lang).describe(sim, now, 14);
+    assert.doesNotMatch(d.headline + d.detail, /out of reach|hors d'atteinte|Nothing uploaded|Aucun upload/);
+  }
+});
+
+test("gains over a window count activity, not the drop", () => {
+  const s = rollback();
+  // The one-hour interval that spans the drop counts as zero: nobody can
+  // tell what happened in it. Everything else is kept.
+  const expected = 350 * GiB - 50 * GiB / 24;
+  const d = Model.deltaOver(s, "up", s.at(-1).t, 7);
+  assert.ok(Math.abs(d.delta - expected) < 1, `${d.delta / GiB}`);
+  assert.equal(Model.formatBar("{up7d}", { samples: s, now: s.at(-1).t }), "+" + (expected / GiB).toFixed(1) + " GB");
+  assert.ok(Model.deltaOver(s, "ratio", s.at(-1).t, 7).delta !== undefined);   // ratio stays the real change
+});
+
+test("resets: reported above 1 GiB only, per counter", () => {
+  const s = rollback();
+  const r = Model.resets(s);
+  assert.deepEqual(r.map((x) => x.metric), ["up", "down"]);
+  // The drop seen between two readings: 350 GiB lost, minus that hour's activity.
+  assert.ok(Math.abs(r[0].drop - (350 * GiB - 50 * GiB / 24)) < 1);
+  assert.ok(Math.abs(r[1].drop - (70 * GiB - 10 * GiB / 24)) < 1);
+  const tiny = [{ t: 0, up: 5 * GiB, down: GiB }, { t: 60, up: 5 * GiB - 100 * 1024 ** 2, down: GiB }];
+  assert.deepEqual(Model.resets(tiny), []);
+  assert.equal(Model.rates([...tiny, { t: 7200, up: 6 * GiB, down: GiB }], 7200, 1).up > 0, true);
+});
+
+test("'crossed on' is the most recent crossing", () => {
+  const T = TiB;
+  const s = [
+    { t: 1000, up: 3.9 * T, down: T }, { t: 2000, up: 4.1 * T, down: T },   // crossed 4 TB
+    { t: 3000, up: 3.6 * T, down: T },                                      // lost by the tracker
+    { t: 4000, up: 3.95 * T, down: T }, { t: 5000, up: 4.05 * T, down: T }, // crossed again
+  ];
+  assert.equal(Model.lastCrossing(s, "up", 4 * T).t, 5000);
+  const sim = Model.simulate(s, 5000, 14, { metric: "up", value: 4 * T });
+  assert.equal(sim.status, "reached");
+  assert.equal(sim.when, 5000);
+  assert.equal(Model.lastCrossing(s, "up", 1 * T), null);                   // there from the start
+});

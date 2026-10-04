@@ -63,6 +63,11 @@ is why a target above `a/b` shows as out of reach at the current pace, and why a
 falling ratio can be forecast too ("ratio falls to 1.00 in 3 weeks"). Forecasts
 appear once there is an hour of history; they settle as the window fills.
 
+If C411 loses data and your counters go back (a crash, a restore from backup),
+the pace only counts increases between readings: the drop is not negative
+activity. Forecasts restart from the real counter, and the panel says when and
+by how much the counters went back.
+
 ## Browsers
 
 With **Browser** set to `Auto` (the default), the widget tries, in order: the

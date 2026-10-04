@@ -52,6 +52,7 @@ var EN = {
     paceDaily: "Pace per day, {0} – {1} · dashed line: forecast pace",
     paceDay: "{0}: ↑ {1} · ↓ {2}",
     paceDayNone: "{0}: no readings",
+    resetNote: "C411's counters went back on {0} ({1}): forecasts count your activity, not the drop.",
     outOfReach: "out of reach at this pace",
     reached: "reached",
     forecast: "FORECAST",
@@ -148,6 +149,7 @@ var FR = {
     paceDaily: "Rythme par jour, du {0} au {1} · pointillés : rythme des prévisions",
     paceDay: "{0} : ↑ {1} · ↓ {2}",
     paceDayNone: "{0} : pas de relevé",
+    resetNote: "Les compteurs de C411 ont reculé le {0} ({1}) : les prévisions comptent ton activité, pas la chute.",
     outOfReach: "hors d'atteinte à ce rythme",
     reached: "atteint",
     forecast: "PRÉVISIONS",
@@ -409,9 +411,49 @@ function pace(perSecond) {
 // Upload and download rates over the last `windowDays`, in bytes per day.
 // Needs at least an hour of data, otherwise a single poll's jitter would be
 // extrapolated to months.
+// Cumulative counters only ever grow, unless the tracker loses data (a crash,
+// a restore from backup). Such a drop is not negative activity: for paces and
+// gains, keep only the increases between readings, like a monitoring rate()
+// over a counter reset. Same length and order as `samples`; values are
+// shifted so the last one equals the real, current counter.
+function continuous(samples) {
+  if (samples.length === 0) return []
+  var up = 0, down = 0, out = [{ t: samples[0].t, up: 0, down: 0 }]
+  for (var i = 1; i < samples.length; i++) {
+    up += Math.max(0, samples[i].up - samples[i - 1].up)
+    down += Math.max(0, samples[i].down - samples[i - 1].down)
+    out.push({ t: samples[i].t, up: up, down: down })
+  }
+  var last = samples[samples.length - 1]
+  var du = last.up - up, dd = last.down - down
+  for (var j = 0; j < out.length; j++) {
+    out[j].up += du
+    out[j].down += dd
+    out[j].ratio = out[j].down > 0 ? out[j].up / out[j].down : null
+  }
+  return out
+}
+
+// Drops of a counter by more than `minDrop` bytes: [{t, metric, drop}],
+// oldest first. Used to tell the user why a pace ignores them.
+var MIN_RESET = 1024 * 1024 * 1024  // 1 GiB: below that it is not worth a word
+
+function resets(samples, minDrop) {
+  var floor = minDrop === undefined ? MIN_RESET : minDrop
+  var out = []
+  for (var i = 1; i < samples.length; i++) {
+    for (var k = 0; k < 2; k++) {
+      var m = k === 0 ? "up" : "down"
+      var drop = samples[i - 1][m] - samples[i][m]
+      if (drop > floor) out.push({ t: samples[i].t, metric: m, drop: drop })
+    }
+  }
+  return out
+}
+
 function rates(samples, now, windowDays) {
-  var win = since(samples, now - windowDays * DAY)
-  if (win.length < 2) win = samples.slice(-2)
+  var win = continuous(since(samples, now - windowDays * DAY))
+  if (win.length < 2) win = continuous(samples.slice(-2))
   if (win.length < 2) return null
   var span = win[win.length - 1].t - win[0].t
   if (span < 3600) return null
@@ -658,7 +700,15 @@ function deltaOver(samples, metric, now, days) {
   }
   if (!base) base = samples[0]
   if (base === last) return null
-  var a = valueOf(base, metric), b = valueOf(last, metric)
+  var a, b
+  if (metric === "ratio") {
+    a = valueOf(base, metric); b = valueOf(last, metric)
+  } else {
+    // Upload/download gained: increases only, so a tracker-side drop in the
+    // window does not show as negative activity.
+    var c = continuous(samples)
+    a = c[samples.indexOf(base)][metric]; b = c[c.length - 1][metric]
+  }
   if (a === null || b === null) return null
   return { delta: b - a, from: base.t, full: base.t <= target }
 }
@@ -816,6 +866,15 @@ function parseTarget(text, l) {
 }
 
 // First recorded sample at or above `value` for a cumulative counter.
+// The reading where a counter last climbed to `value` or above (a target can
+// be crossed, lost to a tracker-side drop, and crossed again), or null when it
+// was already there at the first reading.
+function lastCrossing(samples, metric, value) {
+  for (var i = samples.length - 1; i > 0; i--)
+    if (samples[i][metric] >= value && samples[i - 1][metric] < value) return samples[i]
+  return null
+}
+
 function firstReached(samples, metric, value) {
   for (var i = 0; i < samples.length; i++) if (samples[i][metric] >= value) return samples[i]
   return null
@@ -836,7 +895,7 @@ function simulate(samples, now, windowDays, target) {
 
   if (target.metric === "up") {
     if (last.up >= target.value) {
-      var hit = firstReached(samples, "up", target.value)
+      var hit = lastCrossing(samples, "up", target.value)
       out.status = "reached"
       out.when = hit && hit !== samples[0] ? hit.t : null
       return out
@@ -972,7 +1031,8 @@ if (typeof module !== "undefined") {
     downsample: downsample, chartModel: chartModel, nearest: nearest, formatMetric: formatMetric,
     deltaOver: deltaOver, dailyPace: dailyPace, dayStart: dayStart, MIN_COVERAGE: MIN_COVERAGE, formatDelta: formatDelta, formatBar: formatBar, formatDuration: formatDuration,
     TILE_ORDER: TILE_ORDER, parseTarget: parseTarget, parseTargets: parseTargets,
-    MAX_BAR_CHARS: MAX_BAR_CHARS, MIN_PACE: MIN_PACE, MAX_SHOWN_CEILING: MAX_SHOWN_CEILING, MAX_TARGET_CHARS: MAX_TARGET_CHARS, firstReached: firstReached, simulate: simulate,
+    MAX_BAR_CHARS: MAX_BAR_CHARS, MIN_PACE: MIN_PACE, MAX_SHOWN_CEILING: MAX_SHOWN_CEILING, MAX_TARGET_CHARS: MAX_TARGET_CHARS, firstReached: firstReached, lastCrossing: lastCrossing, simulate: simulate,
+    continuous: continuous, resets: resets, MIN_RESET: MIN_RESET,
     describeSimulation: describeSimulation
   }
 }

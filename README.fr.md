@@ -65,6 +65,11 @@ d'atteinte à ce rythme, et qu'un ratio en baisse peut aussi être prévu
 (« ratio à 1,00 dans 3 semaines »). Les prévisions apparaissent après une heure
 d'historique et se stabilisent à mesure que la fenêtre se remplit.
 
+Si C411 perd des données et que tes compteurs reculent (plantage, restauration
+d'une sauvegarde), le rythme ne compte que les hausses entre deux relevés : la
+chute n'est pas de l'activité négative. Les prévisions repartent du compteur
+réel, et le panneau indique quand et de combien les compteurs ont reculé.
+
 ## Navigateurs
 
 Avec **Browser** sur `Auto` (par défaut), le widget essaie dans l'ordre : le

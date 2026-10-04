@@ -61,6 +61,17 @@ Panel {
     return root.i18n.tr("pace", [span, root.i18n.rate(r.up), root.i18n.rate(r.down)])
   }
 
+  // A tracker-side drop of the counters inside the pace window: paces ignore
+  // it (Model.continuous), and this says so. The most recent one, or null.
+  readonly property var paceReset: {
+    var r = Model.resets(Model.since(svc.samples, svc.now - svc.forecastWindowDays * Model.DAY))
+    return r.length ? r[r.length - 1] : null
+  }
+  readonly property string resetText: paceReset
+    ? root.i18n.tr("resetNote", [root.i18n.shortDate(paceReset.t, svc.now),
+        root.i18n.metricNames[paceReset.metric].toLowerCase() + " −" + root.i18n.bytes(paceReset.drop, 1)])
+    : ""
+
   // Pace per calendar day over the pace window, starting at the first day
   // that has readings (leading empty days would only squeeze the bars).
   readonly property var paceDays: {
@@ -144,7 +155,7 @@ Panel {
     function toggle(): void { root.toggle() }
     function refresh(): string { svc.refresh(); return "ok" }
     function status(): string { return svc.summaryText }
-    function version(): string { return "1.1.0" }
+    function version(): string { return "1.1.1" }
     function samples(): string { return String(svc.samples.length) }
     function forecast(): string {
       var f = svc.forecast
@@ -332,6 +343,17 @@ Panel {
           Layout.fillWidth: true
           text: root.paceText
           color: root.dim
+          wrapMode: Text.Wrap
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+
+        Text {
+          Layout.fillWidth: true
+          visible: root.resetText !== ""
+          textFormat: Text.PlainText
+          text: root.resetText
+          color: root.warning
           wrapMode: Text.Wrap
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
